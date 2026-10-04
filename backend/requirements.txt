@@ -1,0 +1,7 @@
+# Backend core dependencies (Nền tảng người 1 phụ trách)
+# Đã kiểm tra tương thích trên Python 3.14
+fastapi>=0.110.0,<1.0.0
+uvicorn[standard]>=0.28.0,<1.0.0
+pydantic-settings>=2.2.0,<3.0.0
+python-multipart>=0.0.9
+Pillow
