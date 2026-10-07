@@ -1,0 +1,9 @@
+# Scratch-only environment. Submit to owner 1; do not replace shared requirements.
+# Install matched torch/torchvision separately using README CPU/CUDA instructions.
+transformers==4.46.3
+tokenizers==0.20.3
+sentencepiece==0.2.0
+protobuf==5.29.3
+Pillow==12.3.0
+# Measurement in standalone smoke test only:
+psutil==7.0.0
