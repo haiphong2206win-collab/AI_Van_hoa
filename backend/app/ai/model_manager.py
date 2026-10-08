@@ -34,10 +34,12 @@ Quy ước cốt lõi bắt buộc khi tích hợp (Tránh lỗi tranh chấp t�
    - Mọi phương thức trả về NotImplementedError hoặc trạng thái chờ tích hợp.
 """
 
-from typing import TYPE_CHECKING, Any, Dict, List
+import asyncio
 import logging
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from app.config import get_settings
+from app.ai.base import LoadState, MockVIVQAModel
 
 if TYPE_CHECKING:
     import PIL.Image
@@ -45,54 +47,87 @@ if TYPE_CHECKING:
 logger = logging.getLogger("app.ai.model_manager")
 settings = get_settings()
 
-
 class ModelManager:
     """Bộ điều phối nạp, chuyển đổi và suy luận các mô hình AI VQA."""
 
     def __init__(self) -> None:
         self._current_model_id: str | None = None
-        self._current_model_instance: Any = None
+        self._lock: asyncio.Lock | None = None
         self._initialized: bool = False
+        
+        self._registry = {
+            "scratch": MockVIVQAModel(),
+            "finetuned": MockVIVQAModel()
+        }
+        self._model_names = {
+            "scratch": "Scratch Model (Tự huấn luyện)",
+            "finetuned": "Fine-tuned Model (Chuyên biệt)"
+        }
 
     async def startup(self) -> None:
-        """Khởi tạo tài nguyên AI khi backend startup.
-
-        TODO (Người 7 triển khai):
-        - Chuẩn bị lock điều phối.
-        - Kiểm tra tính sẵn sàng của thư mục model_artifacts.
-        """
-        raise NotImplementedError("ModelManager.startup đang chờ Người 7 triển khai.")
+        self._lock = asyncio.Lock()
+        self._initialized = True
+        logger.info("ModelManager đã sẵn sàng.")
 
     async def predict(self, model_id: str, image: Any, question: str) -> str:
-        """Điều phối suy luận an toàn cho một câu hỏi và ảnh.
+        if not self._initialized or self._lock is None:
+            image.close()
+            raise RuntimeError("ModelManager chưa được khởi tạo.")
+            
+        if model_id not in self._registry:
+            image.close()
+            raise ValueError(f"Model ID '{model_id}' không tồn tại.")
 
-        TODO (Người 7 triển khai):
-        - Thu nhận lock điều phối duy nhất.
-        - Kiểm tra nếu model_id != current_model_id thì tiến hành unload model cũ và load model mới.
-        - Gọi adapter.predict trong worker thread qua asyncio.to_thread.
-        - Bắt và xử lý timeout, đảm bảo không ngắt giữa chừng khi tài nguyên chưa giải phóng.
-        - Trả về câu trả lời dạng chuỗi.
-        """
-        raise NotImplementedError("ModelManager.predict đang chờ Người 7 triển khai.")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + settings.INFERENCE_TIMEOUT_SECONDS
+
+        await self._lock.acquire()
+        try:
+            if loop.time() > deadline:
+                logger.warning(f"Loại bỏ request do quá {settings.INFERENCE_TIMEOUT_SECONDS}s.")
+                raise TimeoutError("Request quá hạn trong hàng đợi.")
+
+            if self._current_model_id != model_id:
+                if self._current_model_id is not None:
+                    old_model = self._registry[self._current_model_id]
+                    await asyncio.to_thread(old_model.unload)
+                
+                new_model = self._registry[model_id]
+                await asyncio.to_thread(new_model.load)
+                self._current_model_id = model_id
+
+            model = self._registry[self._current_model_id]
+            inference_task = asyncio.create_task(asyncio.to_thread(model.predict, image, question))
+            
+            try:
+                result = await asyncio.shield(inference_task)
+                return result
+            except asyncio.CancelledError:
+                logger.warning("Client ngắt kết nối. ĐANG CHỜ worker AI hoàn tất...")
+                await inference_task 
+                raise 
+        finally:
+            self._lock.release()
+            image.close()
 
     def list_models(self) -> List[Dict[str, Any]]:
-        """Trả về danh sách model cùng trạng thái thực tế.
-
-        TODO (Người 7 triển khai):
-        - Trả về thông tin thực tế: scratch và finetuned kèm load_state (unloaded/loading/ready/error).
-        """
-        raise NotImplementedError("ModelManager.list_models đang chờ Người 7 triển khai.")
+        result = []
+        for m_id, model in self._registry.items():
+            result.append({
+                "id": m_id,
+                "name": self._model_names.get(m_id, m_id),
+                "available": True,
+                "load_state": model.state.value
+            })
+        return result
 
     async def shutdown(self) -> None:
-        """Dọn dẹp và giải phóng tài nguyên AI khi backend tắt.
+        if self._lock is not None:
+            async with self._lock: 
+                if self._current_model_id is not None:
+                    model = self._registry[self._current_model_id]
+                    if model.state == LoadState.READY:
+                        await asyncio.to_thread(model.unload)
+        self._initialized = False
 
-        TODO (Người 7 triển khai):
-        - Chờ lượt inference hiện tại hoàn tất (nếu có).
-        - Gọi unload() trên model đang nạp.
-        - Giải phóng cache CUDA/RAM.
-        """
-        raise NotImplementedError("ModelManager.shutdown đang chờ Người 7 triển khai.")
-
-
-# Instance singleton của ModelManager sẽ được Người 7 hoàn thiện và khởi tạo
 model_manager = ModelManager()
