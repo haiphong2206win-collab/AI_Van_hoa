@@ -1,64 +1,125 @@
-"""Adapter cho Model Fine-tuned (Finetuned Model Adapter).
+"""Backend adapter for Minh's Vintern-1B-v2 full fine-tuning checkpoint."""
+from __future__ import annotations
 
-Người phụ trách triển khai chính: Người 6.
-Mục tiêu: Đóng gói logic nạp trọng số, tiền xử lý và suy luận của Finetuned Model
-vào lớp FinetunedVIVQAModel tuân thủ BaseVIVQAModel.
+import gc
+import logging
+import os
+from pathlib import Path
+from typing import Any
 
-Hợp đồng giao diện (Synchronous):
-- load() -> None: Đọc trọng số từ Settings.resolved_finetuned_model_path.
-- predict(image: PIL.Image.Image, question: str) -> str: Thực hiện processor/tokenizer và forward pass.
-- unload() -> None: Xóa model khỏi bộ nhớ, dọn dẹp cache GPU/RAM.
-
-Lưu ý:
-- Không import torch/transformers trong bước khung nền này.
-- Người 6 sẽ đề xuất bổ sung thư viện tương ứng vào requirements.txt sau khi chốt artifact.
-- Tuyệt đối không sinh câu trả lời giả mô phỏng.
-"""
-
-from typing import TYPE_CHECKING, Any
 from app.ai.base import BaseVIVQAModel
 from app.config import get_settings
+from app.errors import AppError
 
-if TYPE_CHECKING:
-    import PIL.Image
-
+logger = logging.getLogger("app.ai.finetuned_model")
 settings = get_settings()
+DEFAULT_BASE_MODEL = "5CD-AI/Vintern-1B-v2"
+
+
+def _model_unavailable(message: str) -> AppError:
+    return AppError(code="MODEL_UNAVAILABLE", message=message, status_code=503)
 
 
 class FinetunedVIVQAModel(BaseVIVQAModel):
-    """Lớp điều phối adapter cho model fine-tuned."""
+    """Loads best_vintern_vqa.pt on top of Vintern-1B-v2 and exposes the shared API."""
 
     def __init__(self) -> None:
         self.model_path = settings.resolved_finetuned_model_path
         self.device = settings.AI_DEVICE
+        self.base_model = os.getenv("VINTERN_BASE", DEFAULT_BASE_MODEL)
+        self._model: Any = None
+        self._tokenizer: Any = None
         self._is_loaded = False
 
-    def load(self) -> None:
-        """Nạp trọng số finetuned model.
+    def _checkpoint_file(self) -> Path:
+        path = Path(self.model_path)
+        if path.is_file():
+            return path
+        return path / "best_vintern_vqa.pt"
 
-        TODO (Người 6 triển khai):
-        - Kiểm tra sự tồn tại của artifact tại self.model_path.
-        - Khởi tạo kiến trúc pretrained + fine-tuned head.
-        - Nạp weights và chuyển sang self.device.
-        - Đặt self._is_loaded = True.
-        """
-        raise NotImplementedError("FinetunedVIVQAModel.load đang chờ Người 6 triển khai.")
+    def load(self) -> None:
+        if self._is_loaded:
+            return
+        checkpoint = self._checkpoint_file()
+        if not checkpoint.is_file():
+            raise _model_unavailable(
+                f"Không tìm thấy checkpoint fine-tuned: {checkpoint}. "
+                "Đặt best_vintern_vqa.pt trong FINETUNED_MODEL_PATH."
+            )
+        try:
+            import torch
+            from app.ai.vintern_utils import load_vintern_v2
+
+            dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
+            model, tokenizer, metadata = load_vintern_v2(
+                self.base_model, checkpoint, dtype=dtype
+            )
+            self._model = model.to(self.device).eval()
+            self._tokenizer = tokenizer
+            self._checkpoint_metadata = {
+                "epoch": metadata.get("epoch"),
+                "val_loss": metadata.get("val_loss"),
+                "config": metadata.get("config", {}),
+            }
+            self._is_loaded = True
+            logger.info("Loaded Vintern v2 checkpoint %s", checkpoint)
+        except AppError:
+            raise
+        except Exception as exc:
+            logger.exception("Không nạp được checkpoint Vintern v2 từ %s", checkpoint)
+            self.unload()
+            raise _model_unavailable(
+                "Không nạp được checkpoint Vintern v2. Kiểm tra VINTERN_BASE, "
+                "checkpoint và phiên bản torch/transformers tương thích."
+            ) from exc
 
     def predict(self, image: Any, question: str) -> str:
-        """Thực hiện suy luận VQA với finetuned model.
+        if not self._is_loaded:
+            self.load()
+        try:
+            import torch
+            from app.ai.vintern_utils import (
+                GENERATION_CONFIG,
+                build_inference_prompt,
+                extract_final_answer,
+                preprocess_image,
+            )
 
-        TODO (Người 6 triển khai):
-        - Tiền xử lý ảnh theo quy chuẩn của model pretrained.
-        - Tokenize câu hỏi đầu vào.
-        - Chạy generate/inference và decode chuỗi câu trả lời.
-        """
-        raise NotImplementedError("FinetunedVIVQAModel.predict đang chờ Người 6 triển khai.")
+            pixels = preprocess_image(image).to(device=self.device, dtype=next(self._model.parameters()).dtype)
+            prompt = build_inference_prompt(question.strip())
+            generation = dict(GENERATION_CONFIG)
+            generation["pad_token_id"] = self._tokenizer.eos_token_id
+            with torch.inference_mode():
+                raw = self._model.chat(
+                    self._tokenizer,
+                    pixels,
+                    prompt,
+                    generation,
+                    history=None,
+                    return_history=False,
+                )
+            answer = extract_final_answer(raw)
+            if not answer:
+                raise ValueError("Vintern không sinh câu trả lời.")
+            return answer
+        except AppError:
+            raise
+        except Exception as exc:
+            logger.exception("Suy luận Vintern v2 thất bại")
+            raise AppError(
+                code="INFERENCE_FAILED",
+                message="Suy luận model fine-tuned thất bại.",
+                status_code=500,
+            ) from exc
 
     def unload(self) -> None:
-        """Giải phóng finetuned model khỏi bộ nhớ.
-
-        TODO (Người 6 triển khai):
-        - Xóa tham chiếu model, giải phóng VRAM (nếu dùng CUDA).
-        - Đặt self._is_loaded = False.
-        """
-        raise NotImplementedError("FinetunedVIVQAModel.unload đang chờ Người 6 triển khai.")
+        self._model = None
+        self._tokenizer = None
+        self._is_loaded = False
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
