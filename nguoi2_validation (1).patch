@@ -1,0 +1,661 @@
+diff --git a/backend/app/schemas/error.py b/backend/app/schemas/error.py
+index 63563bc..a7aff58 100644
+--- a/backend/app/schemas/error.py
++++ b/backend/app/schemas/error.py
+@@ -1,33 +1,39 @@
+-"""Pydantic schemas cho phản hồi lỗi chuẩn (Error Response).
+-
+-Người phụ trách triển khai chính: Người 2.
+-Mục tiêu: Mô hình hóa định dạng lỗi JSON thống nhất toàn hệ thống:
+-    {"error": {"code": "VALIDATION_ERROR", "message": "Thông tin lỗi dễ hiểu."}}
+-"""
++from typing import Any, Dict, Tuple
+ 
+ from pydantic import BaseModel, ConfigDict, Field
+ 
+ 
+ class ErrorDetail(BaseModel):
+-    """Chi tiết mã lỗi và thông điệp lỗi gửi tới frontend."""
+-
+     model_config = ConfigDict(extra="forbid")
+ 
+-    code: str = Field(
+-        ...,
+-        description="Mã lỗi dạng SNAKE_CASE (VD: VALIDATION_ERROR, SERVICE_UNAVAILABLE)",
+-        examples=["VALIDATION_ERROR"],
+-    )
+-    message: str = Field(
+-        ...,
+-        description="Thông báo lỗi thân thiện, dễ hiểu cho người dùng cuối",
+-        examples=["Câu hỏi không được để trống hoặc vượt quá 2000 ký tự."],
+-    )
++    code: str = Field(..., examples=["VALIDATION_ERROR"])
++    message: str
+ 
+ 
+ class ErrorResponse(BaseModel):
+-    """Bao bọc phản hồi lỗi chuẩn của toàn bộ API."""
+-
+     model_config = ConfigDict(extra="forbid")
+ 
+-    error: ErrorDetail = Field(..., description="Đối tượng chứa thông tin lỗi")
++    error: ErrorDetail
++
++
++ERROR_CODES_BY_STATUS: Dict[int, Tuple[str, ...]] = {
++    404: ("NOT_FOUND",),
++    405: ("METHOD_NOT_ALLOWED",),
++    413: ("IMAGE_TOO_LARGE",),
++    415: ("INVALID_IMAGE",),
++    422: ("VALIDATION_ERROR",),
++    500: ("INFERENCE_FAILED", "INTERNAL_SERVER_ERROR"),
++    503: ("MODEL_UNAVAILABLE", "SERVICE_UNAVAILABLE"),
++    504: ("INFERENCE_TIMEOUT",),
++}
++
++
++def error_responses(*statuses: int) -> Dict[int, Dict[str, Any]]:
++    """Dict cho `responses=` của route, ví dụ error_responses(413, 415, 422, 503, 504)."""
++    return {
++        status_code: {
++            "model": ErrorResponse,
++            "description": "Mã lỗi: " + " hoặc ".join(ERROR_CODES_BY_STATUS[status_code]),
++        }
++        for status_code in statuses
++    }
+diff --git a/backend/app/schemas/model.py b/backend/app/schemas/model.py
+index d3ccdb1..5b8a119 100644
+--- a/backend/app/schemas/model.py
++++ b/backend/app/schemas/model.py
+@@ -1,50 +1,28 @@
+-"""Pydantic schemas cho API danh sách model AI.
+-
+-Người phụ trách triển khai chính: Người 2.
+-Mục tiêu: Định nghĩa schema cấu trúc thông tin model trả về cho client.
+-
+-Hợp đồng dữ liệu thống nhất:
+-- GET /api/v1/models
+-- Response HTTP 200 dự kiến:
+-    {
+-        "models": [
+-            {
+-                "id": "scratch",
+-                "name": "Model tự xây",
+-                "available": false,
+-                "load_state": "unloaded"
+-            },
+-            ...
+-        ]
+-    }
+-- load_state: unloaded | loading | ready | error
+-"""
+-
+-from typing import List, Literal
++from typing import List, Literal, Tuple, get_args
++
+ from pydantic import BaseModel, ConfigDict, Field
+ 
++ModelId = Literal["scratch", "finetuned"]
++LoadState = Literal["unloaded", "loading", "ready", "error"]
+ 
+-# TODO (Người 2): Hoàn thiện và cập nhật schema theo thực tế khi Người 7 bàn giao ModelManager
+-class ModelItem(BaseModel):
+-    """Thông tin chi tiết của từng model AI."""
++MODEL_IDS: Tuple[str, ...] = get_args(ModelId)
+ 
+-    model_config = ConfigDict(extra="forbid")
+ 
+-    id: Literal["scratch", "finetuned"] = Field(..., description="Mã định danh duy nhất của model")
+-    name: str = Field(..., description="Tên hiển thị thân thiện với người dùng")
+-    available: bool = Field(
+-        ...,
+-        description="Model có sẵn sàng phục vụ suy luận hay không",
+-    )
+-    load_state: Literal["unloaded", "loading", "ready", "error"] = Field(
+-        ...,
+-        description="Trạng thái nạp trọng số hiện tại của model",
+-    )
++class ModelInfo(BaseModel):
++    model_config = ConfigDict(extra="forbid")
+ 
++    id: ModelId = Field(..., examples=["scratch"])
++    name: str = Field(..., min_length=1, examples=["Model tự xây"])
++    available: bool
++    load_state: LoadState
+ 
+-class ModelListResponse(BaseModel):
+-    """Danh sách các model AI được backend hỗ trợ."""
+ 
++class ModelsResponse(BaseModel):
+     model_config = ConfigDict(extra="forbid")
+ 
+-    models: List[ModelItem] = Field(..., description="Danh sách model hỗ trợ")
++    models: List[ModelInfo]
++
++
++# Tên cũ trong khung nền, giữ để code đã import không bị vỡ.
++ModelItem = ModelInfo
++ModelListResponse = ModelsResponse
+diff --git a/backend/app/schemas/prediction.py b/backend/app/schemas/prediction.py
+index 50787b3..5851256 100644
+--- a/backend/app/schemas/prediction.py
++++ b/backend/app/schemas/prediction.py
+@@ -1,41 +1,18 @@
+-"""Pydantic schemas cho API suy luận VQA (Prediction).
++from pydantic import BaseModel, ConfigDict, Field, field_validator
+ 
+-Người phụ trách triển khai chính: Người 2.
+-Mục tiêu: Định nghĩa schema xác thực request/response cho luồng suy luận.
++from app.schemas.model import ModelId
+ 
+-Hợp đồng dữ liệu thống nhất:
+-- Input dự kiến:
+-    + file: File ảnh upload (UploadFile - xử lý ở form/service)
+-    + question: Chuỗi câu hỏi (1 - 2000 ký tự, strip whitespace)
+-    + model_id: 'scratch' | 'finetuned'
+-- Response HTTP 200 dự kiến:
+-    + model_id: str
+-    + question: str
+-    + answer: str
+-"""
+ 
+-from typing import Literal
+-from pydantic import BaseModel, ConfigDict, Field
+-
+-
+-# TODO (Người 2): Hoàn thiện schema request/response theo hợp đồng docs/api_contract.md
+ class PredictionResponse(BaseModel):
+-    """Schema phản hồi kết quả suy luận VQA thành công."""
+-
+     model_config = ConfigDict(extra="forbid")
+ 
+-    model_id: Literal["scratch", "finetuned"] = Field(
+-        ...,
+-        description="Mã định danh model đã thực hiện suy luận",
+-        examples=["scratch"],
+-    )
+-    question: str = Field(
+-        ...,
+-        description="Câu hỏi đã được chuẩn hóa",
+-        examples=["Bức ảnh này chụp danh lam thắng cảnh nào?"],
+-    )
+-    answer: str = Field(
+-        ...,
+-        description="Câu trả lời do model AI sinh ra",
+-        examples=["Chùa Một Cột tại Hà Nội."],
+-    )
++    model_id: ModelId = Field(..., examples=["scratch"])
++    question: str = Field(..., min_length=1, description="Câu hỏi đã chuẩn hóa", examples=["Đây là địa danh nào?"])
++    answer: str = Field(..., min_length=1, examples=["Chùa Một Cột tại Hà Nội."])
++
++    @field_validator("answer")
++    @classmethod
++    def answer_must_have_content(cls, value: str) -> str:
++        if not value.strip():
++            raise ValueError("answer không được rỗng.")
++        return value
+diff --git a/backend/app/services/validation_service.py b/backend/app/services/validation_service.py
+index 9371b88..449ecfd 100644
+--- a/backend/app/services/validation_service.py
++++ b/backend/app/services/validation_service.py
+@@ -1,45 +1,35 @@
+-"""Dịch vụ kiểm tra và xác thực nghiệp vụ (Validation Service).
+-
+-Người phụ trách triển khai chính: Người 2.
+-Mục tiêu: Cung cấp các hàm kiểm tra tính hợp lệ của câu hỏi và model_id theo ràng buộc dự án.
+-
+-Hợp đồng giao diện dự kiến:
+-- validate_question(question: str) -> str:
+-    + Loại bỏ khoảng trắng thừa (strip).
+-    + Kiểm tra độ dài từ 1 đến 2000 ký tự (lấy cấu hình từ Settings.MAX_QUESTION_LENGTH).
+-    + Ném lỗi AppError hoặc ValueError nếu không hợp lệ.
+-    + Trả về chuỗi câu hỏi đã được làm sạch.
+-- validate_model_id(model_id: str) -> str:
+-    + Kiểm tra model_id phải thuộc tập hợp cho phép: {'scratch', 'finetuned'}.
+-    + Ném lỗi nếu model_id không hợp lệ.
+-    + Trả về model_id hợp lệ.
+-
+-Trạng thái hiện tại:
+-- Skeleton dùng NotImplementedError thay vì trả dữ liệu giả.
+-"""
++import unicodedata
+ 
+ from app.config import get_settings
++from app.errors import AppError
++from app.schemas.model import MODEL_IDS
+ 
+-settings = get_settings()
++
++def _validation_error(message: str) -> AppError:
++    return AppError(code="VALIDATION_ERROR", message=message, status_code=422)
+ 
+ 
+ def validate_question(question: str) -> str:
+-    """Xác thực và chuẩn hóa câu hỏi người dùng nhập.
++    """Chuẩn hóa NFC, strip hai đầu, kiểm tra 1..MAX_QUESTION_LENGTH ký tự sau chuẩn hóa.
+ 
+-    TODO (Người 2 triển khai):
+-    - Trim khoảng trắng đầu/cuối.
+-    - Kiểm tra chuỗi không rỗng.
+-    - Kiểm tra độ dài <= settings.MAX_QUESTION_LENGTH.
+-    - Trả về câu hỏi sau khi chuẩn hóa.
++    Chuẩn hóa trước khi đếm để tiếng Việt dạng tổ hợp (NFD) không bị tính dài oan.
+     """
+-    raise NotImplementedError("validate_question đang chờ Người 2 triển khai.")
++    if not isinstance(question, str):
++        raise _validation_error("Câu hỏi phải là chuỗi văn bản.")
+ 
++    normalized = unicodedata.normalize("NFC", question).strip()
++    if not normalized:
++        raise _validation_error("Câu hỏi không được để trống.")
+ 
+-def validate_model_id(model_id: str) -> str:
+-    """Xác thực mã model được chọn.
++    max_length = get_settings().MAX_QUESTION_LENGTH
++    if len(normalized) > max_length:
++        raise _validation_error(f"Câu hỏi không được vượt quá {max_length} ký tự.")
+ 
+-    TODO (Người 2 triển khai):
+-    - Kiểm tra model_id nằm trong ('scratch', 'finetuned').
+-    - Trả về model_id hợp lệ.
+-    """
+-    raise NotImplementedError("validate_model_id đang chờ Người 2 triển khai.")
++    return normalized
++
++
++def validate_model_id(model_id: str) -> str:
++    """Chỉ nhận đúng id trong MODEL_IDS; không sửa id sai và không in lại giá trị người dùng gửi."""
++    if not isinstance(model_id, str) or model_id not in MODEL_IDS:
++        raise _validation_error("model_id không hợp lệ. Chỉ chấp nhận: " + ", ".join(MODEL_IDS) + ".")
++    return model_id
+diff --git a/backend/docs/schema_validation.md b/backend/docs/schema_validation.md
+new file mode 100644
+index 0000000..9fcd182
+--- /dev/null
++++ b/backend/docs/schema_validation.md
+@@ -0,0 +1,165 @@
++# Schema, kiểm tra đầu vào và mẫu gọi API (Người 2)
++
++Phạm vi file: `app/schemas/{prediction,model,error}.py`, `app/services/validation_service.py`, `tests/test_validation.py`, `examples/call_api.py`.
++Nhánh gợi ý: `feature/validation`.
++
++## 1. Quy tắc kiểm tra
++
++| Trường | Quy tắc | Sai thì |
++| :--- | :--- | :--- |
++| `question` | Chuẩn hóa NFC, strip hai đầu; giữ nội dung và xuống dòng bên trong; không đổi hoa/thường. Độ dài **sau chuẩn hóa** từ 1 đến 2000 ký tự Python (`MAX_QUESTION_LENGTH`) | 422 `VALIDATION_ERROR` |
++| `model_id` | Đúng `scratch` hoặc `finetuned`, chữ thường, không khoảng trắng; không tự sửa | 422 `VALIDATION_ERROR` |
++| thiếu `file`/`question`/`model_id` | FastAPI báo qua handler chung của người 1 | 422 `VALIDATION_ERROR` |
++
++Thông báo cố định (đã có test):
++
++- `Câu hỏi không được để trống.`
++- `Câu hỏi không được vượt quá 2000 ký tự.`
++- `model_id không hợp lệ. Chỉ chấp nhận: scratch, finetuned.`
++
++Giao diện (hàm thuần, không mở ảnh, không gọi model):
++
++```python
++validate_question(question: str) -> str   # trả về câu hỏi đã chuẩn hóa
++validate_model_id(model_id: str) -> str   # trả về chính model_id nếu hợp lệ
++```
++
++Cách dùng trong endpoint (người 4): `normalized = validate_question(question)`; sai thì `AppError` tự bay lên handler chung, không bắt lại.
++
++## 2. Schema
++
++- `PredictionResponse`: `model_id`, `question`, `answer`. `extra="forbid"` nên không thêm `confidence`/`history`. `answer` không được rỗng hoặc toàn khoảng trắng.
++- `ModelsResponse.models: list[ModelInfo]`, `ModelInfo`: `id` (`scratch`|`finetuned`), `name`, `available`, `load_state` (`unloaded`|`loading`|`ready`|`error`). Tên cũ `ModelItem`, `ModelListResponse` vẫn dùng được (alias).
++- `ErrorResponse`: `{"error": {"code": str, "message": str}}`.
++- `error_responses(413, 415, 422, 500, 503, 504)` trả dict cho `responses=` của route để Swagger hiện đủ lỗi.
++- `MODEL_IDS` là tuple id hợp lệ, người 7 có thể dùng làm khóa registry.
++
++## 3. Request và response mẫu
++
++`POST /api/v1/predict`, `multipart/form-data`, ba trường: `file`, `question`, `model_id`.
++
++200:
++
++```json
++{"model_id": "scratch", "question": "Trong ảnh có gì?", "answer": "Câu trả lời thực tế từ model."}
++```
++
++`question` trong response là bản đã chuẩn hóa (ví dụ gửi `"  Trong ảnh có gì?  "` thì nhận `"Trong ảnh có gì?"`).
++
++Lỗi (luôn một dạng):
++
++```json
++{"error": {"code": "VALIDATION_ERROR", "message": "Câu hỏi không được để trống."}}
++```
++
++| HTTP | code | Nguồn |
++| :--- | :--- | :--- |
++| 413 | `IMAGE_TOO_LARGE` | người 3 |
++| 415 | `INVALID_IMAGE` | người 3 |
++| 422 | `VALIDATION_ERROR` | người 2 + handler nền |
++| 503 | `MODEL_UNAVAILABLE` / `SERVICE_UNAVAILABLE` | người 5-7 / placeholder |
++| 504 | `INFERENCE_TIMEOUT` | người 7 |
++| 500 | `INFERENCE_FAILED` / `INTERNAL_SERVER_ERROR` | người 4-7 / handler nền |
++| 404, 405 | `NOT_FOUND`, `METHOD_NOT_ALLOWED` | handler nền |
++
++`GET /api/v1/models` 200:
++
++```json
++{
++  "models": [
++    {"id": "scratch", "name": "Model tự xây", "available": true, "load_state": "unloaded"},
++    {"id": "finetuned", "name": "Model fine tune", "available": false, "load_state": "error"}
++  ]
++}
++```
++
++## 4. Ví dụ cho FE
++
++```javascript
++const API = "http://127.0.0.1:8000/api/v1";
++
++class ApiError extends Error {
++  constructor(message, status, code) { super(message); this.status = status; this.code = code; }
++}
++
++async function loadModels() {
++  const res = await fetch(`${API}/models`);
++  const body = await res.json().catch(() => null);
++  if (!res.ok) throw new ApiError(body?.error?.message || `Không tải được model (${res.status})`, res.status, body?.error?.code);
++  return body.models; // [{id, name, available, load_state}]
++}
++
++async function askAI(file, question, modelId) {
++  const data = new FormData();
++  data.append("file", file);
++  data.append("question", question);
++  data.append("model_id", modelId);
++
++  // Không tự đặt Content-Type: trình duyệt tự thêm boundary.
++  const res = await fetch(`${API}/predict`, { method: "POST", body: data });
++  const body = await res.json().catch(() => null);
++
++  if (!res.ok) {
++    throw new ApiError(body?.error?.message || `Yêu cầu thất bại (${res.status})`, res.status, body?.error?.code);
++  }
++  if (typeof body?.answer !== "string" || !body.answer.trim()) {
++    throw new ApiError("Phản hồi AI không hợp lệ", res.status, null);
++  }
++  return body; // {model_id, question (đã chuẩn hóa), answer}
++}
++
++// Kiểm tra nhanh ở FE chỉ để UX; BE vẫn quyết định.
++// Đếm theo ký tự Unicode (giống Python), không dùng .length vì emoji tính 2 đơn vị.
++const tooLong = (text) => [...text.trim()].length > 2000;
++```
++
++### Python (requests)
++
++Bản đầy đủ nằm ở `examples/call_api.py` (`pip install requests`):
++
++```python
++import requests
++
++API = "http://127.0.0.1:8000/api/v1"
++
++with open("anh.jpg", "rb") as f:
++    # Không tự đặt Content-Type: requests tự thêm boundary.
++    r = requests.post(
++        f"{API}/predict",
++        files={"file": ("anh.jpg", f)},
++        data={"question": "Trong ảnh có gì?", "model_id": "scratch"},
++        timeout=200,  # dài hơn deadline 180 giây của backend
++    )
++
++body = r.json()
++if r.ok:
++    print(body["answer"])
++else:
++    print(r.status_code, body["error"]["code"], body["error"]["message"])
++```
++
++Chạy nhanh: `python examples/call_api.py anh.jpg "Trong ảnh có gì?" scratch`. Hàm `ask_ai()` và `list_models()` ném `ApiError(status, code)` nên dùng được cho giao diện Python.
++
++Xử lý theo `status`/`code`, không tự gửi lại khi 504 hoặc lỗi mạng:
++
++- 422: hiện `error.message` cạnh ô nhập, giữ ảnh và câu hỏi.
++- 413/415: yêu cầu chọn ảnh khác.
++- 503: khóa model đó hoặc báo chọn model khác.
++- 504, 500, mã lạ: hiện `error.message`, bật lại nút gửi.
++- `fetch` ném `TypeError`: BE tắt, sai cổng hoặc CORS, khác với lỗi HTTP có JSON.
++
++PowerShell:
++
++```powershell
++curl.exe -X POST "http://127.0.0.1:8000/api/v1/predict" `
++  -F "file=@D:/images/demo.jpg" -F "question=Trong ảnh có gì?" -F "model_id=scratch"
++```
++
++## 5. Điểm cần thống nhất với người 1
++
++1. **Tên mã lỗi đã khớp.** `app/errors.py` đang dùng đúng `NOT_FOUND`, `METHOD_NOT_ALLOWED`, `INTERNAL_SERVER_ERROR`, `SERVICE_UNAVAILABLE`, `INFERENCE_TIMEOUT`, `IMAGE_TOO_LARGE`, `INVALID_IMAGE`, `VALIDATION_ERROR`. Có thể đóng điểm mở trong hợp đồng mục 9. `MODEL_UNAVAILABLE` và `INFERENCE_FAILED` do `AppError` của người 5-7 tự đặt, không có mặc định trong handler.
++2. **`AppError` mặc định status 400.** Mọi nơi ném `AppError` phải truyền `status_code` rõ. Phần của người 2 luôn truyền 422.
++3. **Thông báo 422 thiếu trường đang bằng tiếng Anh** (`file: Field required`) vì `validation_error_handler` nối `msg` của pydantic. FE hiển thị nguyên văn cho người dùng. Đề nghị người 1 đổi thành tiếng Việt, ví dụ `Thiếu trường bắt buộc: file`. Đây là file của người 1 nên chỉ đề xuất.
++4. **Tên hiển thị fine tune:** `docs/api_contract.md` ghi `Model fine-tune`, bản phân công ghi `Model fine tune`. Chọn một (người 7 giữ registry, người 8 sửa docs). `name` chỉ để hiển thị nên không ảnh hưởng FE.
++5. **`answer` rỗng:** nếu model trả chuỗi rỗng mà người 4 vẫn dựng `PredictionResponse`, pydantic sẽ lỗi và FE nhận 500 `INTERNAL_SERVER_ERROR`. Người 4 cần tự kiểm tra trước và ném `AppError(code="INFERENCE_FAILED", status_code=500)`.
++6. **Chưa kiểm chứng:** form `question=""` (rỗng) có thể bị FastAPI coi là thiếu trường nên trả `file/question: Field required` thay vì `Câu hỏi không được để trống.`. Cả hai đều 422 `VALIDATION_ERROR`; người 4/8 xác nhận khi chạy endpoint thật. Nếu muốn luôn có thông báo tiếng Việt, khai báo `question: str = Form("")` rồi để `validate_question` xử lý.
+diff --git a/backend/examples/call_api.py b/backend/examples/call_api.py
+new file mode 100644
+index 0000000..f692576
+--- /dev/null
++++ b/backend/examples/call_api.py
+@@ -0,0 +1,77 @@
++"""Chạy: python examples/call_api.py anh.jpg "Trong ảnh có gì?" scratch (cần: pip install requests)."""
++
++import sys
++from pathlib import Path
++from typing import Any, Dict, List, Optional
++
++import requests
++
++API = "http://127.0.0.1:8000/api/v1"
++# Dài hơn deadline 180 giây của backend để nhận được 504 có JSON thay vì tự cắt trước.
++TIMEOUT_SECONDS = 200
++
++
++class ApiError(Exception):
++    def __init__(self, message: str, status: Optional[int] = None, code: Optional[str] = None) -> None:
++        super().__init__(message)
++        self.status = status
++        self.code = code
++
++
++def _error_from(response: requests.Response) -> ApiError:
++    try:
++        error = response.json()["error"]
++        return ApiError(error["message"], response.status_code, error.get("code"))
++    except (ValueError, KeyError, TypeError):
++        return ApiError(f"Yêu cầu thất bại ({response.status_code})", response.status_code)
++
++
++def list_models() -> List[Dict[str, Any]]:
++    try:
++        response = requests.get(f"{API}/models", timeout=10)
++    except requests.RequestException as exc:
++        raise ApiError(f"Không kết nối được backend: {exc.__class__.__name__}") from exc
++    if not response.ok:
++        raise _error_from(response)
++    return response.json()["models"]
++
++
++def ask_ai(image_path: str, question: str, model_id: str) -> Dict[str, str]:
++    """Không tự gửi lại khi timeout hoặc lỗi mạng vì tác vụ trước có thể vẫn đang chạy ở backend."""
++    path = Path(image_path)
++    with path.open("rb") as image_file:
++        try:
++            response = requests.post(
++                f"{API}/predict",
++                files={"file": (path.name, image_file)},
++                data={"question": question, "model_id": model_id},
++                timeout=TIMEOUT_SECONDS,
++            )
++        except requests.RequestException as exc:
++            raise ApiError(f"Không kết nối được backend: {exc.__class__.__name__}") from exc
++
++    if not response.ok:
++        raise _error_from(response)
++
++    body = response.json()
++    answer = body.get("answer")
++    if not isinstance(answer, str) or not answer.strip():
++        raise ApiError("Phản hồi AI không hợp lệ", response.status_code)
++    return body
++
++
++def main(argv: List[str]) -> int:
++    if len(argv) != 4:
++        print('Cách dùng: python examples/call_api.py <ảnh> "<câu hỏi>" <scratch|finetuned>')
++        return 2
++    try:
++        result = ask_ai(argv[1], argv[2], argv[3])
++    except ApiError as exc:
++        print(f"Lỗi [{exc.status} {exc.code}]: {exc}")
++        return 1
++    print(f"Câu hỏi: {result['question']}\nTrả lời ({result['model_id']}): {result['answer']}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv))
+diff --git a/backend/tests/test_validation.py b/backend/tests/test_validation.py
+new file mode 100644
+index 0000000..cad256f
+--- /dev/null
++++ b/backend/tests/test_validation.py
+@@ -0,0 +1,131 @@
++import unicodedata
++import unittest
++
++from pydantic import ValidationError
++
++from app.errors import AppError, format_error_payload
++from app.schemas.error import ErrorResponse, error_responses
++from app.schemas.model import MODEL_IDS, ModelsResponse
++from app.schemas.prediction import PredictionResponse
++from app.services.validation_service import validate_model_id, validate_question
++
++
++def _error_of(func, value) -> AppError:
++    with_error = None
++    try:
++        func(value)
++    except AppError as exc:
++        with_error = exc
++    assert with_error is not None, f"{func.__name__}({value!r}) lẽ ra phải ném AppError"
++    return with_error
++
++
++class ValidateQuestionTest(unittest.TestCase):
++    def test_empty_and_whitespace_only_rejected(self) -> None:
++        for value in ["", " ", "   ", "\n", "\t \r\n", "\u00a0", "\u3000"]:
++            with self.subTest(value=value):
++                exc = _error_of(validate_question, value)
++                self.assertEqual((exc.status_code, exc.code), (422, "VALIDATION_ERROR"))
++                self.assertEqual(exc.message, "Câu hỏi không được để trống.")
++
++    def test_strip_keeps_inner_content_case_and_newlines(self) -> None:
++        self.assertEqual(validate_question("  Ảnh này là GÌ?  "), "Ảnh này là GÌ?")
++        self.assertEqual(validate_question("\n dòng 1\n\ndòng  2 \t"), "dòng 1\n\ndòng  2")
++
++    def test_vietnamese_unicode_normalized_to_nfc(self) -> None:
++        nfc = "Đây là áo dài truyền thống ở Việt Nam?"
++        nfd = unicodedata.normalize("NFD", nfc)
++        self.assertNotEqual(nfc, nfd)
++        self.assertEqual(validate_question(nfd), nfc)
++        self.assertEqual(validate_question(nfc), nfc)
++
++    def test_length_boundary_2000_and_2001(self) -> None:
++        self.assertEqual(len(validate_question("a" * 2000)), 2000)
++        exc = _error_of(validate_question, "a" * 2001)
++        self.assertEqual((exc.status_code, exc.code), (422, "VALIDATION_ERROR"))
++        self.assertEqual(exc.message, "Câu hỏi không được vượt quá 2000 ký tự.")
++
++    def test_length_counted_after_strip_and_nfc(self) -> None:
++        self.assertEqual(len(validate_question("  " + "a" * 2000 + "\n")), 2000)
++        # 2000 chữ "ế" dạng NFD là 6000 ký tự thô nhưng 2000 sau NFC -> hợp lệ.
++        raw = unicodedata.normalize("NFD", "ế" * 2000)
++        self.assertGreater(len(raw), 2000)
++        self.assertEqual(validate_question(raw), "ế" * 2000)
++        _error_of(validate_question, "ế" * 2001)
++
++    def test_non_string_rejected(self) -> None:
++        for value in [None, 123, b"abc", ["a"]]:
++            with self.subTest(value=value):
++                self.assertEqual(_error_of(validate_question, value).code, "VALIDATION_ERROR")
++
++
++class ValidateModelIdTest(unittest.TestCase):
++    def test_valid_ids_returned_unchanged(self) -> None:
++        for value in ["scratch", "finetuned"]:
++            self.assertEqual(validate_model_id(value), value)
++        self.assertEqual(MODEL_IDS, ("scratch", "finetuned"))
++
++    def test_unknown_ids_rejected_without_auto_fix(self) -> None:
++        for value in ["", " ", "scratch ", " scratch", "Scratch", "FINETUNED", "fine-tune", "other", "scratch\n"]:
++            with self.subTest(value=value):
++                exc = _error_of(validate_model_id, value)
++                self.assertEqual((exc.status_code, exc.code), (422, "VALIDATION_ERROR"))
++                self.assertEqual(exc.message, "model_id không hợp lệ. Chỉ chấp nhận: scratch, finetuned.")
++
++    def test_message_does_not_echo_user_input(self) -> None:
++        self.assertNotIn("<script>", _error_of(validate_model_id, "<script>").message)
++
++    def test_non_string_rejected(self) -> None:
++        self.assertEqual(_error_of(validate_model_id, None).code, "VALIDATION_ERROR")
++
++
++class ErrorFormatTest(unittest.TestCase):
++    def test_app_error_payload_matches_error_response_schema(self) -> None:
++        exc = _error_of(validate_question, "")
++        payload = format_error_payload(exc.code, exc.message)
++        self.assertEqual(ErrorResponse.model_validate(payload).model_dump(), payload)
++        self.assertEqual(list(payload), ["error"])
++        self.assertEqual(list(payload["error"]), ["code", "message"])
++
++    def test_error_response_forbids_extra_fields(self) -> None:
++        with self.assertRaises(ValidationError):
++            ErrorResponse.model_validate({"error": {"code": "X", "message": "y", "detail": "z"}})
++
++    def test_error_responses_helper_for_openapi(self) -> None:
++        docs = error_responses(413, 415, 422, 500, 503, 504)
++        self.assertEqual(sorted(docs), [413, 415, 422, 500, 503, 504])
++        self.assertIs(docs[422]["model"], ErrorResponse)
++        self.assertIn("MODEL_UNAVAILABLE", docs[503]["description"])
++        self.assertIn("INFERENCE_FAILED", docs[500]["description"])
++
++
++class ResponseSchemaTest(unittest.TestCase):
++    def test_prediction_response_unicode_and_exact_keys(self) -> None:
++        body = PredictionResponse(model_id="scratch", question="Trong ảnh có gì?", answer="Chùa Một Cột tại Hà Nội.")
++        self.assertEqual(set(body.model_dump()), {"model_id", "question", "answer"})
++        self.assertEqual(body.answer, "Chùa Một Cột tại Hà Nội.")
++
++    def test_prediction_response_rejects_blank_answer_unknown_model_and_extra(self) -> None:
++        base = {"model_id": "scratch", "question": "q", "answer": "a"}
++        for patch in [{"answer": ""}, {"answer": "  \n"}, {"model_id": "other"}, {"question": ""}, {"confidence": 0.9}]:
++            with self.subTest(patch=patch), self.assertRaises(ValidationError):
++                PredictionResponse.model_validate({**base, **patch})
++
++    def test_models_response_matches_contract_example(self) -> None:
++        example = {
++            "models": [
++                {"id": "scratch", "name": "Model tự xây", "available": True, "load_state": "unloaded"},
++                {"id": "finetuned", "name": "Model fine tune", "available": False, "load_state": "error"},
++            ]
++        }
++        self.assertEqual(ModelsResponse.model_validate(example).model_dump(), example)
++
++    def test_models_response_rejects_unknown_id_or_state(self) -> None:
++        item = {"id": "scratch", "name": "n", "available": True, "load_state": "ready"}
++        for patch in [{"id": "other"}, {"load_state": "busy"}, {"extra": 1}]:
++            with self.subTest(patch=patch), self.assertRaises(ValidationError):
++                ModelsResponse.model_validate({"models": [{**item, **patch}]})
++
++
++if __name__ == "__main__":
++    unittest.main()
