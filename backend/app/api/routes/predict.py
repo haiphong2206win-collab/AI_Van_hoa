@@ -1,25 +1,15 @@
-"""Endpoint suy luận hỏi đáp bằng ảnh (VQA Predict).
+"""API hỏi đáp hình ảnh — Phan Trọng Trung (Người 4).
 
-Người phụ trách triển khai chính: Người 4.
-Khởi tạo khung / placeholder: Người 1 (Lead).
-
-Hợp đồng dự kiến sau khi hoàn thiện:
-- Phương thức: POST /api/v1/predict
-- Body: multipart/form-data gồm file (ảnh), question (chuỗi), model_id ('scratch' | 'finetuned').
-- Trả về: {"model_id": "...", "question": "...", "answer": "..."}
-
-Trạng thái hiện tại:
-- Placeholder kiểm tra sự hiện diện của các trường bắt buộc thông qua FastAPI Form/File.
-- Không đọc, không lưu nội dung ảnh vào bộ nhớ hay đĩa.
-- Luôn đóng stream của UploadFile an toàn trong khối finally.
-- Trả về HTTP 503 SERVICE_UNAVAILABLE do chưa tích hợp tầng AI và ImageService.
-- Tuyệt đối không sinh câu trả lời giả để mô phỏng.
+Route sở hữu ảnh từ read_image() và đóng ảnh trong finally.
+Manager phải ngừng dùng ảnh gốc trước khi trả kết quả hoặc ném lỗi/hủy.
+Worker chạy tiếp sau timeout phải dùng bản sao riêng do manager quản lý.
+Xem handoff_person4/INTEGRATION.md trước khi ghép manager hiện tại.
 """
 
 import logging
 
 from anyio import CancelScope
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, Request, UploadFile
 
 from app.ai.model_manager import model_manager
 from app.errors import AppError
@@ -53,6 +43,7 @@ router = APIRouter(tags=["Predict"])
     },
 )
 async def predict(
+    request: Request,
     file: UploadFile = File(..., description="File ảnh JPEG, PNG hoặc WEBP tĩnh"),
     question: str = Form(..., description="Nội dung câu hỏi"),
     model_id: str = Form(
@@ -77,16 +68,35 @@ async def predict(
                 status_code=422,
             ) from exc
 
+        # Dùng cùng instance với /models và lifespan của ứng dụng.
+        # Giữ singleton làm phương án tương thích với khung ban đầu.
+        manager = getattr(request.app.state, "model_manager", model_manager)
+        if manager is None or getattr(manager, "_initialized", True) is False:
+            raise AppError(
+                code="SERVICE_UNAVAILABLE",
+                message="Bộ quản lý model chưa sẵn sàng.",
+                status_code=503,
+            )
+
         # Gọi dịch vụ người 3 để đọc, kiểm tra và chuẩn hóa ảnh.
         image = await image_service.read_image(file)
 
         # Gọi bộ quản lý model của người 7.
         # Manager chịu trách nhiệm hàng đợi, timeout và điều phối worker AI.
-        answer = await model_manager.predict(
-            model_id=model_id,
-            image=image,
-            question=question,
-        )
+        try:
+            answer = await manager.predict(
+                model_id=model_id,
+                image=image,
+                question=question,
+            )
+        except TimeoutError as exc:
+            # Manager hiện ném TimeoutError khi yêu cầu hết hạn trong hàng đợi.
+            # Chỉ đổi lỗi từ manager; không tạo timeout/hủy worker ở route.
+            raise AppError(
+                code="INFERENCE_TIMEOUT",
+                message="Yêu cầu đã vượt quá thời gian suy luận cho phép.",
+                status_code=504,
+            ) from exc
 
         # Không trả thành công nếu đáp án rỗng hoặc sai kiểu dữ liệu.
         if not isinstance(answer, str) or not answer.strip():
@@ -116,9 +126,9 @@ async def predict(
         ) from exc
 
     finally:
-        # Đóng ảnh sau khi manager không còn sử dụng ảnh gốc.
-        # Nếu worker chạy tiếp sau timeout, manager phải giữ bản sao riêng
-        # hoặc chờ worker hoàn tất trước khi thoát hàm predict().
+        # Route luôn giải phóng ảnh mình sở hữu, kể cả lỗi/cancellation.
+        # Manager không được giữ ảnh gốc sau khi predict() thoát; worker còn
+        # chạy phải dùng bản sao riêng. Không bỏ cleanup để né lỗi manager.
         if image is not None:
             try:
                 image.close()
