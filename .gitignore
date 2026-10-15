@@ -18,3 +18,10 @@ tmp/
 Thumbs.db
 node_modules/
 dist/
+
+# Model checkpoints and weights
+*.pt
+*.bin
+*.safetensors
+*.gguf
+*.onnx

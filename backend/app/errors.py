@@ -88,8 +88,8 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
         message = str(err_obj.get("message", "Đã xảy ra lỗi HTTP."))
     else:
         # Ánh xạ status code sang mã lỗi chuẩn theo hợp đồng API
-        http_422 = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", status.HTTP_422_UNPROCESSABLE_ENTITY)
-        http_413 = getattr(status, "HTTP_413_CONTENT_TOO_LARGE", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        http_422 = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", None) or getattr(status, "HTTP_422_UNPROCESSABLE_ENTITY", 422)
+        http_413 = getattr(status, "HTTP_413_CONTENT_TOO_LARGE", None) or getattr(status, "HTTP_413_REQUEST_ENTITY_TOO_LARGE", 413)
         default_codes = {
             status.HTTP_404_NOT_FOUND: "NOT_FOUND",
             status.HTTP_405_METHOD_NOT_ALLOWED: "METHOD_NOT_ALLOWED",
