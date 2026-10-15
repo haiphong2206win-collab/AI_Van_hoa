@@ -14,8 +14,9 @@ Hợp đồng dữ liệu thống nhất:
     + answer: str
 """
 
-from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+
+from app.schemas.model import ModelId
 
 
 # TODO (Người 2): Hoàn thiện schema request/response theo hợp đồng docs/api_contract.md
@@ -24,18 +25,29 @@ class PredictionResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    model_id: Literal["scratch", "finetuned"] = Field(
+    model_id: ModelId = Field(
         ...,
         description="Mã định danh model đã thực hiện suy luận",
         examples=["scratch"],
     )
     question: str = Field(
         ...,
+        min_length=1,
+        max_length=2000,
         description="Câu hỏi đã được chuẩn hóa",
         examples=["Bức ảnh này chụp danh lam thắng cảnh nào?"],
     )
     answer: str = Field(
         ...,
+        min_length=1,
         description="Câu trả lời do model AI sinh ra",
         examples=["Chùa Một Cột tại Hà Nội."],
     )
+
+    @field_validator("question", "answer")
+    @classmethod
+    def text_must_have_content(cls, value: str, info: ValidationInfo) -> str:
+        """Chặn chuỗi chỉ gồm khoảng trắng (min_length không bắt được trường hợp này)."""
+        if not value.strip():
+            raise ValueError(f"{info.field_name} không được rỗng.")
+        return value

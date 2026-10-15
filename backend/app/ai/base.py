@@ -16,25 +16,56 @@ Quy ước bắt buộc:
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
+from enum import Enum
+import time
+from pydantic import BaseModel
 
 if TYPE_CHECKING:
     import PIL.Image
 
+class LoadState(str, Enum):
+    UNLOADED = "unloaded"
+    LOADING = "loading"
+    READY = "ready"
+    ERROR = "error"
+
+class ModelInfo(BaseModel):
+    id: str
+    name: str
+    available: bool
+    load_state: LoadState
 
 class BaseVIVQAModel(ABC):
     """Giao diện chuẩn cho các adapter mô hình VQA."""
-
+    
     @abstractmethod
     def load(self) -> None:
-        """Nạp trọng số và khởi tạo pipeline mô hình."""
         raise NotImplementedError
 
     @abstractmethod
     def predict(self, image: Any, question: str) -> str:
-        """Thực hiện suy luận trả lời câu hỏi dựa trên hình ảnh."""
         raise NotImplementedError
 
     @abstractmethod
     def unload(self) -> None:
-        """Giải phóng mô hình khỏi bộ nhớ."""
         raise NotImplementedError
+
+# --- MOCK MODEL DÙNG ĐỂ NGHIỆM THU ---
+class MockVIVQAModel(BaseVIVQAModel):
+    """Mô hình giả lập cố ý chạy chậm để test concurrency và timeout."""
+    
+    def __init__(self):
+        self.state = LoadState.UNLOADED
+
+    def load(self) -> None:
+        self.state = LoadState.LOADING
+        time.sleep(2)
+        self.state = LoadState.READY
+
+    def predict(self, image: Any, question: str) -> str:
+        time.sleep(10)
+        return f"Đây là câu trả lời giả lập. Câu hỏi nhận được: '{question}'"
+
+    def unload(self) -> None:
+        time.sleep(1)
+        self.state = LoadState.UNLOADED

@@ -12,32 +12,30 @@ Trạng thái hiện tại:
 - Tuyệt đối không trả danh sách model với available=true giả lập.
 """
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Request
+from typing import List
+
+from app.ai.base import ModelInfo
 
 router = APIRouter(tags=["Models"])
 
-
 @router.get(
     "/models",
+    response_model=List[ModelInfo],
     status_code=status.HTTP_200_OK,
-    summary="[Placeholder] Lấy danh sách model AI được hỗ trợ",
-    description="Endpoint tạm thời. Sẽ trả về HTTP 503 cho đến khi Người 7 hoàn thiện tích hợp ModelManager.",
-    responses={
-        status.HTTP_503_SERVICE_UNAVAILABLE: {
-            "description": "Chức năng đang chờ Người 7 tích hợp",
-        }
-    },
+    summary="Lấy danh sách model AI được hỗ trợ",
+    description="Trả về metadata và trạng thái nạp (load_state) thực tế của model AI trên RAM.",
 )
-async def list_models() -> None:
-    """Endpoint placeholder cho danh sách model.
-
-    Người 7 sẽ thay thế hàm này để gọi ModelManager.list_models()
-    khi hoàn thiện tầng AI.
-    """
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={
-            "code": "SERVICE_UNAVAILABLE",
-            "message": "Chức năng đang chờ tích hợp.",
-        },
-    )
+async def list_models(request: Request) -> List[ModelInfo]:
+    manager = getattr(request.app.state, "model_manager", None)
+    
+    if manager is None or not manager._initialized:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SERVICE_UNAVAILABLE",
+                "message": "ModelManager chưa được tích hợp hoặc đang khởi động.",
+            },
+        )
+        
+    return manager.list_models()
