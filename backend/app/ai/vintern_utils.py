@@ -1,6 +1,6 @@
 """Vintern-1B-v2 loading and preprocessing compatible with Minh's notebook checkpoint."""
 from __future__ import annotations
-
+from functools import wraps
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -72,7 +72,7 @@ def _patch_transformers_compat() -> None:
     if getattr(Qwen2ForCausalLM, "_return_dict_dup_patch_applied", False):
         return
     original_prepare = Qwen2ForCausalLM.prepare_inputs_for_generation
-
+    @wraps(original_prepare)
     def patched_prepare(self, *args, **kwargs):
         inputs = original_prepare(self, *args, **kwargs)
         inputs.pop("return_dict", None)
