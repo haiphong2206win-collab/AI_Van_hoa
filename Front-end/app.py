@@ -7,6 +7,9 @@ from state import init_session_state, new_chat, clear_image
 # Cần Streamlit >= 1.43 (st.chat_input hỗ trợ accept_file)
 st.set_page_config(page_title="VietCulture AI", page_icon="🏛️", layout="wide")
 
+# Câu hỏi FE tự gửi kèm ảnh (người dùng chỉ gửi ảnh, BE bắt buộc có question)
+DEFAULT_QUESTION = "Đây là món ăn gì? Nguyên liệu gồm những gì và cách nấu như thế nào?"
+
 # Áp dụng CSS
 st.markdown(get_css(), unsafe_allow_html=True)
 
@@ -78,11 +81,17 @@ if submitted:
         st.session_state.messages.append(
             {"role": "user", "content": text or "(đã gửi ảnh)", "image": new_img}
         )
+        # Chỉ nhận ảnh: có nhập text thì báo không nhận, không gửi BE
+        if text.strip():
+            reply = "⚠️ Hệ thống không nhận câu hỏi dạng văn bản. Vui lòng chỉ gửi ảnh món ăn."
+        elif not new_img:
+            reply = "⚠️ Vui lòng gửi ảnh món ăn."
         # Nếu model không khả dụng, cảnh báo
-        if selected_option and not selected_option["available"]:
+        elif selected_option and not selected_option["available"]:
             reply = f"⚠️ Mô hình '{selected_model_name}' hiện không khả dụng. Xin vui lòng chọn mô hình khác."
         else:
-            reply = generate_reply(selected_model_id, text, st.session_state.current_image)
+            # BE bắt buộc có question nên FE tự gửi câu hỏi mặc định về món ăn
+            reply = generate_reply(selected_model_id, DEFAULT_QUESTION, new_img)
             
         st.session_state.messages.append(
             {"role": "assistant", "content": reply, "model": selected_model_name}
