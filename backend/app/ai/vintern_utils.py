@@ -82,11 +82,39 @@ def _patch_transformers_compat() -> None:
     Qwen2ForCausalLM._return_dict_dup_patch_applied = True
 
 
+def _register_fake_flash_attn() -> None:
+    """Remote code imports flash_attn, which is unavailable on Windows; copied from vqa.zip vintern_model.py.
+
+    Flash attention stays disabled via config, so these empty modules are never called.
+    """
+    import importlib.machinery
+    import sys
+    import types
+
+    def register(name: str) -> None:
+        if name in sys.modules and getattr(sys.modules[name], "__spec__", None) is not None:
+            return
+        dummy = types.ModuleType(name)
+        dummy.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+        sys.modules[name] = dummy
+
+    try:
+        import flash_attn  # noqa: F401
+        return
+    except ImportError:
+        pass
+    register("flash_attn")
+    for sub in ("flash_attn_interface", "bert_padding", "layers", "layers.rotary",
+                "ops", "ops.fused_dense", "modules", "modules.mha"):
+        register(f"flash_attn.{sub}")
+
+
 def load_vintern_v2(base_model: str, checkpoint_path: str | Path, dtype: Any):
     """Load the v2 base model, then apply notebook's full model_state_dict checkpoint."""
     import torch
     from transformers import AutoConfig, AutoModel, AutoTokenizer
 
+    _register_fake_flash_attn()
     _patch_transformers_compat()
     base = Path(base_model)
     local_only = base.is_dir()
