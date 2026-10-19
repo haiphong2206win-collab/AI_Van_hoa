@@ -9,6 +9,7 @@ def init_session_state():
 def new_chat():
     st.session_state.messages = []
     st.session_state.current_image = None
+    st.session_state.pending = None
 
 def clear_image():
     st.session_state.current_image = None
