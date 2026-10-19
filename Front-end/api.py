@@ -7,9 +7,11 @@ def fetch_models():
     try:
         response = requests.get(f"{API_BASE_URL}/models", timeout=5)
         if response.status_code == 200:
-            return response.json().get("models", [])
-    except:
-        pass
+            data = response.json()
+            # BE trả về mảng model; vẫn hỗ trợ dạng {"models": [...]}
+            return data if isinstance(data, list) else data.get("models", [])
+    except Exception as e:
+        print(f"[fetch_models] Không lấy được danh sách model từ BE: {e}")
     # Mặc định theo hợp đồng nếu BE chưa bật
     return [
         {"id": "scratch", "name": "Model tự xây", "available": True, "load_state": "unloaded"},

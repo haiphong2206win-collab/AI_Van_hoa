@@ -39,7 +39,9 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from app.config import get_settings
-from app.ai.base import LoadState, MockVIVQAModel
+from app.ai.base import LoadState
+from app.ai.finetuned_model import FinetunedVIVQAModel
+from app.ai.scratch_model import ScratchVIVQAModel
 
 if TYPE_CHECKING:
     import PIL.Image
@@ -56,9 +58,10 @@ class ModelManager:
         self._initialized: bool = False
         
         self._registry = {
-            "scratch": MockVIVQAModel(),
-            "finetuned": MockVIVQAModel()
+            "scratch": ScratchVIVQAModel(),
+            "finetuned": FinetunedVIVQAModel()
         }
+        self._load_errors: set[str] = set()
         self._model_names = {
             "scratch": "Scratch Model (Tự huấn luyện)",
             "finetuned": "Fine-tuned Model (Chuyên biệt)"
@@ -91,9 +94,16 @@ class ModelManager:
                 if self._current_model_id is not None:
                     old_model = self._registry[self._current_model_id]
                     await asyncio.to_thread(old_model.unload)
-                
+                    # Model cũ đã giải phóng VRAM; nếu nạp model mới lỗi thì không còn model nào
+                    self._current_model_id = None
+
                 new_model = self._registry[model_id]
-                await asyncio.to_thread(new_model.load)
+                try:
+                    await asyncio.to_thread(new_model.load)
+                except Exception:
+                    self._load_errors.add(model_id)
+                    raise
+                self._load_errors.discard(model_id)
                 self._current_model_id = model_id
 
             model = self._registry[self._current_model_id]
@@ -113,21 +123,34 @@ class ModelManager:
     def list_models(self) -> List[Dict[str, Any]]:
         result = []
         for m_id, model in self._registry.items():
+            if m_id in self._load_errors:
+                state = LoadState.ERROR
+            elif getattr(model, "_is_loaded", False):
+                state = LoadState.READY
+            else:
+                state = LoadState.UNLOADED
             result.append({
                 "id": m_id,
                 "name": self._model_names.get(m_id, m_id),
-                "available": True,
-                "load_state": model.state.value
+                "available": self._artifacts_present(m_id, model),
+                "load_state": state.value
             })
         return result
 
+    @staticmethod
+    def _artifacts_present(model_id: str, model: Any) -> bool:
+        """Chỉ kiểm tra file weights có mặt, không nạp model."""
+        if model_id == "scratch":
+            return model.artifacts_present()
+        return model._checkpoint_file().is_file()
+
     async def shutdown(self) -> None:
         if self._lock is not None:
-            async with self._lock: 
+            async with self._lock:
                 if self._current_model_id is not None:
                     model = self._registry[self._current_model_id]
-                    if model.state == LoadState.READY:
-                        await asyncio.to_thread(model.unload)
+                    await asyncio.to_thread(model.unload)
+                    self._current_model_id = None
         self._initialized = False
 
 model_manager = ModelManager()

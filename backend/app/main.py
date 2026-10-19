@@ -17,6 +17,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.ai.model_manager import model_manager
 from app.api.router import api_router
 from app.config import get_settings
 from app.errors import register_error_handlers
@@ -35,15 +36,8 @@ logger = logging.getLogger("app.main")
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Quản lý vòng đời khởi động và tắt ứng dụng FastAPI.
 
-    Ghi chú tích hợp cho Người 1 và Người 7:
-    - Hiện tại chỉ ghi log trạng thái khởi động/tắt của phần nền.
-    - TODO (Người 1): Khi Người 7 hoàn thiện và bàn giao app/ai/model_manager.py,
-      tiến hành import model_manager và gọi:
-          await model_manager.startup()
-      ở khối khởi động.
-    - TODO (Người 1): Tương tự, gọi:
-          await model_manager.shutdown()
-      ở khối dọn dẹp khi tắt ứng dụng.
+    - Khởi động: gọi model_manager.startup() và gắn vào app.state cho /models, /predict.
+    - Tắt: gọi model_manager.shutdown() để giải phóng model khỏi RAM/VRAM.
     - Tuyệt đối không tự triển khai worker AI hoặc nuốt ngoại lệ tại đây.
     """
     logger.info("=== BẮT ĐẦU KHỞI ĐỘNG HỆ THỐNG: %s ===", settings.APP_NAME)
@@ -52,12 +46,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Chế độ thiết bị AI dự kiến: %s", settings.AI_DEVICE)
     logger.info("Thư mục Scratch Model: %s", settings.resolved_scratch_model_path)
     logger.info("Thư mục Finetuned Model: %s", settings.resolved_finetuned_model_path)
-    logger.info("Lưu ý: Hệ thống đang ở pha nền tảng, chưa nạp trọng số model AI.")
+
+    # Model được nạp lười ở request /predict đầu tiên, không nạp lúc khởi động
+    await model_manager.startup()
+    app.state.model_manager = model_manager
 
     # Điểm chuyển giao quyền điều khiển cho ứng dụng
     yield
 
     logger.info("=== ĐANG TẮT HỆ THỐNG: %s ===", settings.APP_NAME)
+    await model_manager.shutdown()
     logger.info("Hoàn tất dọn dẹp tiến trình backend.")
 
 
